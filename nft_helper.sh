@@ -534,7 +534,7 @@ main_menu() {
     clear
     get_status
     echo -e "################################################"
-    echo -e "#           Nftables 端口转发管理脚本          #"
+    echo -e "#         Caesar 蜜汁 Nft 端口转发管理脚本        #"
     echo -e "#          系统: ${SYS_TYPE}        #"
     echo -e "################################################"
     echo -e "Nftables 状态: ${INSTALL_STATUS}"
