@@ -30,7 +30,7 @@ fi
 enable_ip_forward() {
     # 1. 临时生效
     sysctl -w net.ipv4.ip_forward=1 > /dev/null 2>&1
-    
+
     # 2. 永久生效 (写入配置文件)
     if ! grep -q "^net.ipv4.ip_forward=1$" /etc/sysctl.conf; then
         sed -i '/net.ipv4.ip_forward/d' /etc/sysctl.conf
@@ -82,7 +82,7 @@ get_status() {
 
     # 2. 运行状态
     RUN_STATUS="${RED}未运行${PLAIN}"
-    
+
     if [ "$IS_ALPINE" -eq 1 ]; then
         # OpenRC 检测
         if rc-service "$SERVICE_NAME" status 2>/dev/null | grep -q "started"; then
@@ -96,7 +96,7 @@ get_status() {
             fi
         fi
     fi
-    
+
     # 3. IP Forward 状态检测
     IP_FW=$(sysctl -n net.ipv4.ip_forward 2>/dev/null)
     if [ "$IP_FW" == "1" ]; then
@@ -120,22 +120,40 @@ validate_port_range() {
     local start=$1
     local end=$2
     local name=$3
-    
+
     if [[ ! "$start" =~ ^[0-9]+$ ]] || [[ ! "$end" =~ ^[0-9]+$ ]]; then
         echo -e "${RED}错误：端口必须是数字。${PLAIN}"
         return 1
     fi
-    
+
     if [ "$start" -lt 1 ] || [ "$start" -gt 65535 ] || [ "$end" -lt 1 ] || [ "$end" -gt 65535 ]; then
         echo -e "${RED}错误：端口范围必须在 1-65535 之间。${PLAIN}"
         return 1
     fi
-    
+
     if [ "$start" -gt "$end" ]; then
         echo -e "${RED}错误：起始端口不能大于结束端口。${PLAIN}"
         return 1
     fi
-    
+
+    return 0
+}
+
+# 验证单个端口
+validate_single_port() {
+    local port=$1
+    local name=$2
+
+    if [[ ! "$port" =~ ^[0-9]+$ ]]; then
+        echo -e "${RED}错误：$name 必须是数字。${PLAIN}"
+        return 1
+    fi
+
+    if [ "$port" -lt 1 ] || [ "$port" -gt 65535 ]; then
+        echo -e "${RED}错误：$name 必须在 1-65535 之间。${PLAIN}"
+        return 1
+    fi
+
     return 0
 }
 
@@ -143,7 +161,7 @@ validate_port_range() {
 check_port_range_exists() {
     local start=$1
     local end=$2
-    
+
     # 检查是否有任何规则使用了这个范围内的端口
     while read -r line; do
         if echo "$line" | grep -q "dport"; then
@@ -152,7 +170,7 @@ check_port_range_exists() {
             if [[ -n "$single_port" ]] && [ "$single_port" -ge "$start" ] && [ "$single_port" -le "$end" ]; then
                 return 1
             fi
-            
+
             # 尝试匹配端口范围
             local range=$(echo "$line" | grep -oP 'dport \{\K[0-9,-]+\}')
             if [[ -n "$range" ]]; then
@@ -161,14 +179,14 @@ check_port_range_exists() {
             fi
         fi
     done < <(grep "dnat to" "$CONFIG_FILE")
-    
+
     return 0
 }
 
 # 安装或更新 Nftables
 install_nftables() {
     echo -e "${GREEN}正在通过包管理器安装 Nftables...${PLAIN}"
-    
+
     if [ "$IS_ALPINE" -eq 1 ]; then
         apk add nftables
         rc-update add nftables default
@@ -182,13 +200,13 @@ install_nftables() {
     init_config force
 
     echo -e "${GREEN}Nftables 安装完成！${PLAIN}"
-    
+
     if [ "$IS_ALPINE" -eq 1 ]; then
         rc-service nftables start
     else
         systemctl start nftables
     fi
-    
+
     wait_for_key
 }
 
@@ -216,7 +234,7 @@ table ip nat {
 EOF
         chmod +x "$CONFIG_FILE"
     fi
-    
+
     if ! grep -q "MARKER_START" "$CONFIG_FILE"; then
          echo -e "${RED}警告: 配置文件格式不兼容本脚本，建议备份后运行选项1重置配置。${PLAIN}"
     fi
@@ -226,9 +244,9 @@ EOF
 add_rule() {
     init_config
     echo -e "${YELLOW}=== 添加单端口转发规则 (TCP+UDP) ===${PLAIN}"
-    
+
     read -p "请输入监听 IP (默认 0.0.0.0, 回车即可): " listen_ip
-    
+
     read -p "请输入监听端口 (必填): " listen_port
     if [[ -z "$listen_port" ]]; then
         echo -e "${RED}错误：监听端口不能为空。${PLAIN}"
@@ -236,8 +254,7 @@ add_rule() {
         return
     fi
 
-    if [[ ! "$listen_port" =~ ^[0-9]+$ ]] || [ "$listen_port" -lt 1 ] || [ "$listen_port" -gt 65535 ]; then
-        echo -e "${RED}错误：端口必须是 1-65535 之间的数字。${PLAIN}"
+    if ! validate_single_port "$listen_port" "监听端口"; then
         wait_for_key
         return
     fi
@@ -261,9 +278,8 @@ add_rule() {
         wait_for_key
         return
     fi
-    
-    if [[ ! "$remote_port" =~ ^[0-9]+$ ]] || [ "$remote_port" -lt 1 ] || [ "$remote_port" -gt 65535 ]; then
-        echo -e "${RED}错误：目标端口必须是 1-65535 之间的数字。${PLAIN}"
+
+    if ! validate_single_port "$remote_port" "目标端口"; then
         wait_for_key
         return
     fi
@@ -282,34 +298,38 @@ add_rule() {
     wait_for_key
 }
 
-# 添加端口段转发规则
+# 添加端口段转发规则（简化输入版）
 add_range_rule() {
     init_config
     echo -e "${YELLOW}=== 添加端口段转发规则 (TCP+UDP) ===${PLAIN}"
     echo -e "${YELLOW}说明：将本地端口段转发到目标服务器${PLAIN}"
-    
+    echo -e "${GREEN}使用示例:${PLAIN}"
+    echo -e "  1:1映射: 监听 80-88 转目标 80-88 (目标起始端口留空)"
+    echo -e "  偏移映射: 监听 80-88 转目标 10-18 (输入目标起始端口 10，自动计算结束端口 18)"
+    echo ""
+
     read -p "请输入监听 IP (默认 0.0.0.0, 回车即可): " listen_ip
-    
+
     read -p "请输入起始监听端口 (必填): " port_start
     if [[ -z "$port_start" ]]; then
         echo -e "${RED}错误：起始端口不能为空。${PLAIN}"
         wait_for_key
         return
     fi
-    
+
     read -p "请输入结束监听端口 (必填): " port_end
     if [[ -z "$port_end" ]]; then
         echo -e "${RED}错误：结束端口不能为空。${PLAIN}"
         wait_for_key
         return
     fi
-    
+
     # 验证端口范围
     if ! validate_port_range "$port_start" "$port_end" "监听"; then
         wait_for_key
         return
     fi
-    
+
     # 检查端口范围是否已存在
     if ! check_port_range_exists "$port_start" "$port_end"; then
         echo -e "${RED}错误：该端口范围内已有规则存在。${PLAIN}"
@@ -323,9 +343,13 @@ add_range_rule() {
         wait_for_key
         return
     fi
+
+    # 计算端口数量
+    local port_count=$((port_end - port_start + 1))
     
-    read -p "请输入目标起始端口 (不填则默认与监听端口相同，1:1映射): " remote_port_start
-    
+    echo -e "${GREEN}提示：当前监听端口段包含 $port_count 个端口${PLAIN}"
+    read -p "请输入目标起始端口 (不填则默认与监听起始端口相同，1:1映射): " remote_port_start
+
     # 确认信息并构建规则
     if [[ -z "$remote_port_start" ]]; then
         # 1:1 映射
@@ -334,66 +358,70 @@ add_range_rule() {
         echo -e "监听端口范围: ${GREEN}$port_start - $port_end${PLAIN}"
         echo -e "目标 IP: ${GREEN}$remote_ip${PLAIN}"
         echo -e "目标端口范围: ${GREEN}$port_start - $port_end (1:1映射)${PLAIN}"
-        
+
         read -p "确认添加？[y/n] (默认 y): " confirm
         if [[ "$confirm" == "n" || "$confirm" == "N" ]]; then
             echo -e "${YELLOW}已取消添加。${PLAIN}"
             wait_for_key
             return
         fi
-        
-        # 构建1:1映射规则
+
+        # 构建1:1映射规则（保持原语法）
         if [[ -n "$listen_ip" && "$listen_ip" != "0.0.0.0" ]]; then
             RULE_STR="        ip daddr $listen_ip meta l4proto {tcp, udp} th dport { $port_start-$port_end } dnat to $remote_ip"
         else
             RULE_STR="        meta l4proto {tcp, udp} th dport { $port_start-$port_end } dnat to $remote_ip"
         fi
-        
+
         echo -e "${GREEN}端口段规则添加成功！${PLAIN}"
         echo -e "已添加: [Local] ${listen_ip:-0.0.0.0}:$port_start-$port_end -> [Remote] $remote_ip:$port_start-$port_end (1:1映射)"
     else
-        # 端口段偏移映射
-        read -p "请输入目标结束端口 (必填): " remote_port_end
-        if [[ -z "$remote_port_end" ]]; then
-            echo -e "${RED}错误：目标结束端口不能为空。${PLAIN}"
+        # 验证目标起始端口
+        if ! validate_single_port "$remote_port_start" "目标起始端口"; then
             wait_for_key
             return
         fi
         
-        # 验证目标端口范围
-        if ! validate_port_range "$remote_port_start" "$remote_port_end" "目标"; then
-            wait_for_key
-            return
-        fi
+        # 自动计算目标结束端口
+        local remote_port_end=$((remote_port_start + port_count - 1))
         
-        # 检查端口数量是否一致
-        local listen_count=$((port_end - port_start + 1))
-        local remote_count=$((remote_port_end - remote_port_start + 1))
-        if [ $listen_count -ne $remote_count ]; then
-            echo -e "${RED}错误：监听端口数量 ($listen_count) 与目标端口数量 ($remote_count) 不一致。${PLAIN}"
+        # 验证目标结束端口是否在有效范围内
+        if [ "$remote_port_end" -gt 65535 ]; then
+            echo -e "${RED}错误：自动计算的目标结束端口 $remote_port_end 超出 65535 范围。${PLAIN}"
+            echo -e "${YELLOW}提示：监听端口段包含 $port_count 个端口，目标起始端口 $remote_port_start 太大。${PLAIN}"
             wait_for_key
             return
         fi
         
         echo -e "\n${YELLOW}请确认以下信息：${PLAIN}"
         echo -e "监听 IP: ${GREEN}${listen_ip:-0.0.0.0}${PLAIN}"
-        echo -e "监听端口范围: ${GREEN}$port_start - $port_end${PLAIN}"
+        echo -e "监听端口范围: ${GREEN}$port_start - $port_end (共 $port_count 个端口)${PLAIN}"
         echo -e "目标 IP: ${GREEN}$remote_ip${PLAIN}"
-        echo -e "目标端口范围: ${GREEN}$remote_port_start - $remote_port_end (端口段偏移)${PLAIN}"
+        echo -e "目标端口范围: ${GREEN}$remote_port_start - $remote_port_end (自动计算，共 $port_count 个端口)${PLAIN}"
         
+        # 计算并显示偏移量
+        local offset=$((remote_port_start - port_start))
+        if [ $offset -gt 0 ]; then
+            echo -e "端口偏移: ${GREEN}+$offset (向后偏移)${PLAIN}"
+        elif [ $offset -lt 0 ]; then
+            echo -e "端口偏移: ${GREEN}$offset (向前偏移)${PLAIN}"
+        else
+            echo -e "端口偏移: ${GREEN}0 (无偏移)${PLAIN}"
+        fi
+
         read -p "确认添加？[y/n] (默认 y): " confirm
         if [[ "$confirm" == "n" || "$confirm" == "N" ]]; then
             echo -e "${YELLOW}已取消添加。${PLAIN}"
             wait_for_key
             return
         fi
-        
-        # 构建端口映射字符串
+
+        # 构建端口映射字符串（保持原 map 语法）
         local map_str="{ "
         local l_port=$port_start
         local r_port=$remote_port_start
         local first=true
-        
+
         while [ $l_port -le $port_end ]; do
             if [ "$first" = true ]; then
                 first=false
@@ -405,26 +433,22 @@ add_range_rule() {
             r_port=$((r_port + 1))
         done
         map_str="$map_str }"
-        
-        # 构建端口段偏移映射规则
+
+        # 构建端口段偏移映射规则（保持原 map 语法）
         if [[ -n "$listen_ip" && "$listen_ip" != "0.0.0.0" ]]; then
             RULE_STR="        ip daddr $listen_ip meta l4proto {tcp, udp} th dport { $port_start-$port_end } dnat to $remote_ip : th dport map $map_str"
         else
             RULE_STR="        meta l4proto {tcp, udp} th dport { $port_start-$port_end } dnat to $remote_ip : th dport map $map_str"
         fi
-        
-        # 计算偏移量显示
-        local offset=$((remote_port_start - port_start))
-        if [ $offset -gt 0 ]; then
-            offset_dir="向后偏移 $offset"
-        elif [ $offset -lt 0 ]; then
-            offset_dir="向前偏移 $((0 - offset))"
-        else
-            offset_dir="无偏移"
-        fi
-        
+
         echo -e "${GREEN}端口段规则添加成功！${PLAIN}"
-        echo -e "已添加: [Local] ${listen_ip:-0.0.0.0}:$port_start-$port_end -> [Remote] $remote_ip:$remote_port_start-$remote_port_end (端口段$offset_dir)"
+        if [ $offset -gt 0 ]; then
+            echo -e "已添加: [Local] ${listen_ip:-0.0.0.0}:$port_start-$port_end -> [Remote] $remote_ip:$remote_port_start-$remote_port_end (向后偏移 $offset)"
+        elif [ $offset -lt 0 ]; then
+            echo -e "已添加: [Local] ${listen_ip:-0.0.0.0}:$port_start-$port_end -> [Remote] $remote_ip:$remote_port_start-$remote_port_end (向前偏移 ${offset#-})"
+        else
+            echo -e "已添加: [Local] ${listen_ip:-0.0.0.0}:$port_start-$port_end -> [Remote] $remote_ip:$remote_port_start-$remote_port_end (无偏移)"
+        fi
     fi
 
     sed -i "/# MARKER_END/i \\$RULE_STR" "$CONFIG_FILE"
@@ -444,7 +468,7 @@ view_rules() {
     echo -e "${YELLOW}=== 现有转发规则 ===${PLAIN}"
     echo -e "格式: [监听IP]:监听端口(范围) -> 目标IP:目标端口(范围)"
     echo "--------------------------------"
-    
+
     local rule_count=0
     while read -r line; do
         # 匹配单端口规则
@@ -452,11 +476,11 @@ view_rules() {
             l_port=$(echo "$line" | grep -oP 'dport \K\d+')
             r_addr=$(echo "$line" | grep -oP 'dnat to \K[0-9.:]+')
             l_ip="0.0.0.0"
-            
+
             if echo "$line" | grep -q "ip daddr"; then
                 l_ip=$(echo "$line" | grep -oP 'ip daddr \K[0-9.]+')
             fi
-            
+
             if [[ -n "$l_port" && -n "$r_addr" ]]; then
                 echo "$l_ip:$l_port -> $r_addr"
                 ((rule_count++))
@@ -466,26 +490,31 @@ view_rules() {
             l_range=$(echo "$line" | grep -oP 'dport { \K[0-9]+-[0-9]+')
             l_start=$(echo $l_range | cut -d'-' -f1)
             l_end=$(echo $l_range | cut -d'-' -f2)
-            
+            l_ip="0.0.0.0"
+
+            if echo "$line" | grep -q "ip daddr"; then
+                l_ip=$(echo "$line" | grep -oP 'ip daddr \K[0-9.]+')
+            fi
+
             # 检查是否有端口映射
             if echo "$line" | grep -q "th dport map"; then
-                # 有端口映射，提取第一个映射关系计算偏移
+                # 端口段偏移映射
                 r_ip=$(echo "$line" | grep -oP 'dnat to \K[0-9.]+')
                 map_part=$(echo "$line" | grep -oP '{ [0-9]+ : [0-9]+(, [0-9]+ : [0-9]+)* }')
                 first_map=$(echo "$map_part" | grep -oP '[0-9]+ : [0-9]+' | head -1)
                 l_map_port=$(echo "$first_map" | cut -d':' -f1 | tr -d ' ')
                 r_map_port=$(echo "$first_map" | cut -d':' -f2 | tr -d ' ')
-                
+
                 if [[ -n "$l_map_port" && -n "$r_map_port" ]]; then
                     offset=$((r_map_port - l_map_port))
                     if [ $offset -gt 0 ]; then
                         offset_dir="向后偏移 $offset"
                     elif [ $offset -lt 0 ]; then
-                        offset_dir="向前偏移 $((0 - offset))"
+                        offset_dir="向前偏移 ${offset#-}"
                     else
                         offset_dir="无偏移"
                     fi
-                    
+
                     # 计算实际目标端口段
                     r_start=$((l_start + offset))
                     r_end=$((l_end + offset))
@@ -495,24 +524,16 @@ view_rules() {
             else
                 # 无端口映射，1:1映射
                 r_ip=$(echo "$line" | grep -oP 'dnat to \K[0-9.]+')
-                l_ip="0.0.0.0"
-                
-                if echo "$line" | grep -q "ip daddr"; then
-                    l_ip=$(echo "$line" | grep -oP 'ip daddr \K[0-9.]+')
-                fi
-                
-                if [[ -n "$l_range" && -n "$r_ip" ]]; then
-                    echo "$l_ip:$l_range -> $r_ip:$l_range (1:1映射)"
-                    ((rule_count++))
-                fi
+                echo "$l_ip:$l_range -> $r_ip:$l_range (1:1映射)"
+                ((rule_count++))
             fi
         fi
     done < <(grep "dnat to" "$CONFIG_FILE")
-    
+
     if [ $rule_count -eq 0 ]; then
         echo -e "${YELLOW}暂无转发规则。${PLAIN}"
     fi
-    
+
     echo "--------------------------------"
     echo -e "总计: ${GREEN}$rule_count${PLAIN} 条规则"
     wait_for_key
@@ -527,7 +548,7 @@ quick_edit_rule() {
     fi
 
     echo -e "${YELLOW}=== 快速修改转发规则 ===${PLAIN}"
-    
+
     # 收集所有规则行号
     mapfile -t line_numbers < <(grep -n "dnat to" "$CONFIG_FILE" | cut -d: -f1)
     total=${#line_numbers[@]}
@@ -542,7 +563,7 @@ quick_edit_rule() {
     local i=1
     for ln in "${line_numbers[@]}"; do
         line=$(sed -n "${ln}p" "$CONFIG_FILE")
-        
+
         # 判断规则类型并显示
         if echo "$line" | grep -q "dport { [0-9]\+-[0-9]\+ }"; then
             # 端口段规则
@@ -553,7 +574,7 @@ quick_edit_rule() {
             if echo "$line" | grep -q "ip daddr"; then
                 l_ip=$(echo "$line" | grep -oP 'ip daddr \K[0-9.]+')
             fi
-            
+
             # 检查是否有端口映射
             if echo "$line" | grep -q "th dport map"; then
                 # 端口段偏移映射
@@ -562,17 +583,17 @@ quick_edit_rule() {
                 first_map=$(echo "$map_part" | grep -oP '[0-9]+ : [0-9]+' | head -1)
                 l_map_port=$(echo "$first_map" | cut -d':' -f1 | tr -d ' ')
                 r_map_port=$(echo "$first_map" | cut -d':' -f2 | tr -d ' ')
-                
+
                 if [[ -n "$l_map_port" && -n "$r_map_port" ]]; then
                     offset=$((r_map_port - l_map_port))
                     if [ $offset -gt 0 ]; then
                         offset_dir="向后偏移 $offset"
                     elif [ $offset -lt 0 ]; then
-                        offset_dir="向前偏移 $((0 - offset))"
+                        offset_dir="向前偏移 ${offset#-}"
                     else
                         offset_dir="无偏移"
                     fi
-                    
+
                     # 计算实际目标端口段
                     r_start=$((l_start + offset))
                     r_end=$((l_end + offset))
@@ -614,12 +635,12 @@ quick_edit_rule() {
     idx=$((choice - 1))
     target_line_num=${line_numbers[$idx]}
     line_content=$(sed -n "${target_line_num}p" "$CONFIG_FILE")
-    
+
     # 判断规则类型并执行相应的修改逻辑
     if echo "$line_content" | grep -q "dport { [0-9]\+-[0-9]\+ }"; then
         # 端口段规则修改
         echo -e "${YELLOW}正在修改端口段规则...${PLAIN}"
-        
+
         # 提取当前规则信息
         old_l_range=$(echo "$line_content" | grep -oP 'dport { \K[0-9]+-[0-9]+')
         old_l_start=$(echo $old_l_range | cut -d'-' -f1)
@@ -628,13 +649,13 @@ quick_edit_rule() {
         if echo "$line_content" | grep -q "ip daddr"; then
             old_l_ip=$(echo "$line_content" | grep -oP 'ip daddr \K[0-9.]+')
         fi
-        
+
         # 检查是否是端口段偏移映射
         local is_offset=false
         local old_r_ip=""
         local old_r_start=""
         local old_r_end=""
-        
+
         if echo "$line_content" | grep -q "th dport map"; then
             is_offset=true
             old_r_ip=$(echo "$line_content" | grep -oP 'dnat to \K[0-9.]+')
@@ -652,65 +673,89 @@ quick_edit_rule() {
             old_r_start=$old_l_start
             old_r_end=$old_l_end
         fi
-        
+
         echo -e "${YELLOW}请逐项输入新值 (直接回车保持原值):${PLAIN}"
-        
+
         # 修改监听IP
         read -p "监听 IP [当前: $old_l_ip]: " new_l_ip
         [[ -z "$new_l_ip" ]] && new_l_ip="$old_l_ip"
-        
+
         # 修改监听端口范围
         read -p "监听起始端口 [当前: $old_l_start]: " new_l_start
         [[ -z "$new_l_start" ]] && new_l_start="$old_l_start"
-        
+
         read -p "监听结束端口 [当前: $old_l_end]: " new_l_end
         [[ -z "$new_l_end" ]] && new_l_end="$old_l_end"
-        
+
         # 验证监听端口范围
         if ! validate_port_range "$new_l_start" "$new_l_end" "监听"; then
             wait_for_key
             return
         fi
-        
+
         # 修改目标IP
         read -p "目标 IP [当前: $old_r_ip]: " new_r_ip
         [[ -z "$new_r_ip" ]] && new_r_ip="$old_r_ip"
-        
+
         # 询问修改类型
         echo -e "\n${YELLOW}请选择转发类型:${PLAIN}"
-        echo "[1]1:1映射 (目标端口与监听端口相同)"
-        echo "[2]端口段偏移 (自定义目标端口范围)"
+        echo "[1] 1:1映射 (目标端口与监听端口相同)"
+        echo "[2] 端口段偏移 (自定义目标端口范围)"
         read -p "请选择 [1/2] (默认 1): " rule_type
+
+        local port_count=$((new_l_end - new_l_start + 1))
         
         if [[ "$rule_type" == "2" ]]; then
             # 端口段偏移映射
+            echo -e "${GREEN}提示：当前监听端口段包含 $port_count 个端口${PLAIN}"
             read -p "目标起始端口 [当前: $old_r_start]: " new_r_start
             [[ -z "$new_r_start" ]] && new_r_start="$old_r_start"
-            
-            read -p "目标结束端口 [当前: $old_r_end]: " new_r_end
-            [[ -z "$new_r_end" ]] && new_r_end="$old_r_end"
-            
-            # 验证目标端口范围
-            if ! validate_port_range "$new_r_start" "$new_r_end" "目标"; then
+
+            # 验证目标起始端口
+            if ! validate_single_port "$new_r_start" "目标起始端口"; then
                 wait_for_key
                 return
             fi
             
-            # 检查端口数量是否一致
-            local listen_count=$((new_l_end - new_l_start + 1))
-            local remote_count=$((new_r_end - new_r_start + 1))
-            if [ $listen_count -ne $remote_count ]; then
-                echo -e "${RED}错误：监听端口数量 ($listen_count) 与目标端口数量 ($remote_count) 不一致。${PLAIN}"
+            # 自动计算目标结束端口
+            local new_r_end=$((new_r_start + port_count - 1))
+            
+            # 验证目标结束端口是否在有效范围内
+            if [ "$new_r_end" -gt 65535 ]; then
+                echo -e "${RED}错误：自动计算的目标结束端口 $new_r_end 超出 65535 范围。${PLAIN}"
+                echo -e "${YELLOW}提示：监听端口段包含 $port_count 个端口，目标起始端口 $new_r_start 太大。${PLAIN}"
                 wait_for_key
                 return
             fi
             
+            echo -e "\n${YELLOW}请确认修改信息：${PLAIN}"
+            echo -e "监听 IP: ${GREEN}${new_l_ip:-0.0.0.0}${PLAIN}"
+            echo -e "监听端口范围: ${GREEN}$new_l_start - $new_l_end (共 $port_count 个端口)${PLAIN}"
+            echo -e "目标 IP: ${GREEN}$new_r_ip${PLAIN}"
+            echo -e "目标端口范围: ${GREEN}$new_r_start - $new_r_end (自动计算，共 $port_count 个端口)${PLAIN}"
+            
+            local new_offset=$((new_r_start - new_l_start))
+            if [ $new_offset -gt 0 ]; then
+                echo -e "端口偏移: ${GREEN}+$new_offset (向后偏移)${PLAIN}"
+            elif [ $new_offset -lt 0 ]; then
+                echo -e "端口偏移: ${GREEN}$new_offset (向前偏移)${PLAIN}"
+            else
+                echo -e "端口偏移: ${GREEN}0 (无偏移)${PLAIN}"
+            fi
+
+            read -p "确认修改？[y/n] (默认 y): " confirm
+            if [[ "$confirm" == "n" || "$confirm" == "N" ]]; then
+                echo -e "${YELLOW}已取消修改。${PLAIN}"
+                wait_for_key
+                return
+            fi
+
             # 构建端口映射字符串
             local map_str="{ "
             local l_port=$new_l_start
             local r_port=$new_r_start
             local first=true
-            
+
             while [ $l_port -le $new_l_end ]; do
                 if [ "$first" = true ]; then
                     first=false
@@ -722,34 +767,43 @@ quick_edit_rule() {
                 r_port=$((r_port + 1))
             done
             map_str="$map_str }"
-            
+
             # 构建端口段偏移映射规则
             if [[ -n "$new_l_ip" && "$new_l_ip" != "0.0.0.0" ]]; then
                 NEW_RULE="        ip daddr $new_l_ip meta l4proto {tcp, udp} th dport { $new_l_start-$new_l_end } dnat to $new_r_ip : th dport map $map_str"
             else
                 NEW_RULE="        meta l4proto {tcp, udp} th dport { $new_l_start-$new_l_end } dnat to $new_r_ip : th dport map $map_str"
             fi
-            
-            # 计算偏移量显示
-            local offset=$((new_r_start - new_l_start))
-            if [ $offset -gt 0 ]; then
-                offset_dir="向后偏移 $offset"
-            elif [ $offset -lt 0 ]; then
-                offset_dir="向前偏移 $((0 - offset))"
-            else
-                offset_dir="无偏移"
-            fi
-            
+
             echo -e "${GREEN}规则修改成功！${PLAIN}"
-            echo -e "新规则: $new_l_ip:$new_l_start-$new_l_end -> $new_r_ip:$new_r_start-$new_r_end (端口段$offset_dir)"
+            if [ $new_offset -gt 0 ]; then
+                echo -e "新规则: $new_l_ip:$new_l_start-$new_l_end -> $new_r_ip:$new_r_start-$new_r_end (向后偏移 $new_offset)"
+            elif [ $new_offset -lt 0 ]; then
+                echo -e "新规则: $new_l_ip:$new_l_start-$new_l_end -> $new_r_ip:$new_r_start-$new_r_end (向前偏移 ${new_offset#-})"
+            else
+                echo -e "新规则: $new_l_ip:$new_l_start-$new_l_end -> $new_r_ip:$new_r_start-$new_r_end (无偏移)"
+            fi
         else
             # 1:1映射
+            echo -e "\n${YELLOW}请确认修改信息：${PLAIN}"
+            echo -e "监听 IP: ${GREEN}${new_l_ip:-0.0.0.0}${PLAIN}"
+            echo -e "监听端口范围: ${GREEN}$new_l_start - $new_l_end${PLAIN}"
+            echo -e "目标 IP: ${GREEN}$new_r_ip${PLAIN}"
+            echo -e "目标端口范围: ${GREEN}$new_l_start - $new_l_end (1:1映射)${PLAIN}"
+
+            read -p "确认修改？[y/n] (默认 y): " confirm
+            if [[ "$confirm" == "n" || "$confirm" == "N" ]]; then
+                echo -e "${YELLOW}已取消修改。${PLAIN}"
+                wait_for_key
+                return
+            fi
+
             if [[ -n "$new_l_ip" && "$new_l_ip" != "0.0.0.0" ]]; then
                 NEW_RULE="        ip daddr $new_l_ip meta l4proto {tcp, udp} th dport { $new_l_start-$new_l_end } dnat to $new_r_ip"
             else
                 NEW_RULE="        meta l4proto {tcp, udp} th dport { $new_l_start-$new_l_end } dnat to $new_r_ip"
             fi
-            
+
             echo -e "${GREEN}规则修改成功！${PLAIN}"
             echo -e "新规则: $new_l_ip:$new_l_start-$new_l_end -> $new_r_ip:$new_l_start-$new_l_end (1:1映射)"
         fi
@@ -768,7 +822,7 @@ quick_edit_rule() {
 
         read -p "监听 IP [当前: $old_l_ip]: " new_l_ip
         [[ -z "$new_l_ip" ]] && new_l_ip="$old_l_ip"
-        
+
         read -p "监听 端口 [当前: $old_l_port]: " new_l_port
         [[ -z "$new_l_port" ]] && new_l_port="$old_l_port"
 
@@ -816,7 +870,7 @@ edit_rule_vim() {
             apt-get update && apt-get install -y vim
         fi
     fi
-    
+
     echo -e "${GREEN}正在打开配置文件 (使用 vim)...${PLAIN}"
     echo -e "${YELLOW}提示：Nftables 语法严格，请确保保留 chain prerouting 和 chain postrouting 结构。${PLAIN}"
     echo -e "${YELLOW}vim 基础操作: i 进入编辑模式, Esc 退出编辑模式, :wq 保存退出, :q! 不保存退出${PLAIN}"
@@ -834,7 +888,7 @@ choose_editor() {
     echo -e " 2. 使用 vim 编辑 (功能强大)"
     echo -e " 0. 返回主菜单"
     read -p "请输入数字: " editor_choice
-    
+
     case "$editor_choice" in
         1) edit_rule_nano ;;
         2) edit_rule_vim ;;
@@ -852,7 +906,7 @@ delete_rule() {
     fi
 
     echo -e "${YELLOW}=== 删除转发规则 ===${PLAIN}"
-    
+
     line_numbers=($(grep -n "dnat to" "$CONFIG_FILE" | cut -d: -f1))
     total=${#line_numbers[@]}
 
@@ -866,36 +920,39 @@ delete_rule() {
     local i=1
     for ln in "${line_numbers[@]}"; do
         line=$(sed -n "${ln}p" "$CONFIG_FILE")
-        
+
         # 判断是单端口还是端口段规则
         if echo "$line" | grep -q "dport { [0-9]\+-[0-9]\+ }"; then
             # 端口段规则
             l_range=$(echo "$line" | grep -oP 'dport { \K[0-9]+-[0-9]+')
             l_start=$(echo $l_range | cut -d'-' -f1)
             l_end=$(echo $l_range | cut -d'-' -f2)
-            
+
             # 检查是否有端口映射
             if echo "$line" | grep -q "th dport map"; then
-                # 有端口映射，提取第一个映射关系计算偏移
+                # 端口段偏移映射
                 r_ip=$(echo "$line" | grep -oP 'dnat to \K[0-9.]+')
                 map_part=$(echo "$line" | grep -oP '{ [0-9]+ : [0-9]+(, [0-9]+ : [0-9]+)* }')
                 first_map=$(echo "$map_part" | grep -oP '[0-9]+ : [0-9]+' | head -1)
                 l_map_port=$(echo "$first_map" | cut -d':' -f1 | tr -d ' ')
                 r_map_port=$(echo "$first_map" | cut -d':' -f2 | tr -d ' ')
-                
+
                 if [[ -n "$l_map_port" && -n "$r_map_port" ]]; then
                     offset=$((r_map_port - l_map_port))
                     if [ $offset -gt 0 ]; then
                         offset_dir="向后偏移 $offset"
                     elif [ $offset -lt 0 ]; then
-                        offset_dir="向前偏移 $((0 - offset))"
+                        offset_dir="向前偏移 ${offset#-}"
                     else
                         offset_dir="无偏移"
                     fi
-                    
-                    # 计算实际目标端口段
+
                     r_start=$((l_start + offset))
                     r_end=$((l_end + offset))
+                    l_ip="0.0.0.0"
+                    if echo "$line" | grep -q "ip daddr"; then
+                        l_ip=$(echo "$line" | grep -oP 'ip daddr \K[0-9.]+')
+                    fi
                     echo -e "${GREEN}$i.${PLAIN} [端口段] $l_ip:$l_range -> $r_ip:$r_start-$r_end (端口段$offset_dir)"
                 fi
             else
@@ -937,20 +994,20 @@ delete_rule() {
 
     idx=$((choice - 1))
     target_line_num=${line_numbers[$idx]}
-    
+
     # 显示将要删除的规则
     echo -e "${YELLOW}即将删除规则:${PLAIN}"
     sed -n "${target_line_num}p" "$CONFIG_FILE"
     read -p "确认删除？[y/n] (默认 y): " confirm
-    
+
     if [[ "$confirm" == "n" || "$confirm" == "N" ]]; then
         echo -e "${YELLOW}已取消删除。${PLAIN}"
         wait_for_key
         return
     fi
-    
+
     sed -i "${target_line_num}d" "$CONFIG_FILE"
-    
+
     echo -e "${GREEN}规则 $choice 已删除。${PLAIN}"
     echo -e "${YELLOW}注意：请重启服务 (选项 12) 使配置生效。${PLAIN}"
     wait_for_key
@@ -959,7 +1016,7 @@ delete_rule() {
 # 服务管理统一入口
 manage_service() {
     action=$1
-    
+
     if [ "$IS_ALPINE" -eq 1 ]; then
         # Alpine (OpenRC)
         case "$action" in
@@ -1031,7 +1088,7 @@ clear_config() {
 
         # 强制重置配置文件
         init_config force
-        
+
         # 立即生效
         if command -v nft &> /dev/null; then
             nft flush ruleset
@@ -1048,7 +1105,7 @@ clear_config() {
 # 更新脚本
 update_script() {
     echo -e "${GREEN}正在检查脚本更新...${PLAIN}"
-    
+
     # 下载新脚本
     curl -L -o /tmp/nft_helper_new.sh "$UPDATE_URL"
     if [ $? -ne 0 ]; then
@@ -1068,7 +1125,7 @@ update_script() {
     # 覆盖当前脚本
     mv /tmp/nft_helper_new.sh "$0"
     chmod +x "$0"
-    
+
     # 同时更新快捷方式
     if [[ "$(realpath "$0")" != "$(realpath "$SHORTCUT_PATH")" ]]; then
         cp "$0" "$SHORTCUT_PATH"
