@@ -115,6 +115,45 @@ wait_for_key() {
     main_menu
 }
 
+# 清理备注内容，避免破坏 nftables 配置行
+sanitize_remark() {
+    local remark="$1"
+    remark="${remark//$'\r'/ }"
+    remark="${remark//$'\n'/ }"
+    remark="${remark//#/ }"
+    remark="${remark//\\/ }"
+    echo "$remark" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//'
+}
+
+# 从规则行中提取备注
+extract_remark() {
+    local line="$1"
+    if [[ "$line" == *"# 备注:"* ]]; then
+        echo "${line#*# 备注: }"
+    fi
+}
+
+# 为规则行追加备注
+append_remark() {
+    local rule="$1"
+    local remark
+    remark=$(sanitize_remark "$2")
+    if [[ -n "$remark" ]]; then
+        echo "$rule # 备注: $remark"
+    else
+        echo "$rule"
+    fi
+}
+
+# 显示备注
+format_remark() {
+    local remark
+    remark=$(extract_remark "$1")
+    if [[ -n "$remark" ]]; then
+        echo " [备注: $remark]"
+    fi
+}
+
 # 验证端口范围
 validate_port_range() {
     local start=$1
@@ -284,16 +323,22 @@ add_rule() {
         return
     fi
 
+    read -p "请输入备注 (可选): " remark
+
     if [[ -n "$listen_ip" && "$listen_ip" != "0.0.0.0" ]]; then
         RULE_STR="        ip daddr $listen_ip meta l4proto {tcp, udp} th dport $listen_port dnat to $remote_ip:$remote_port"
     else
         RULE_STR="        meta l4proto {tcp, udp} th dport $listen_port dnat to $remote_ip:$remote_port"
     fi
 
+    RULE_STR=$(append_remark "$RULE_STR" "$remark")
     sed -i "/# MARKER_END/i \\$RULE_STR" "$CONFIG_FILE"
 
     echo -e "${GREEN}规则添加成功！${PLAIN}"
-    echo -e "已添加: [Local] $listen_ip:$listen_port -> [Remote] $remote_ip:$remote_port"
+    echo -e "已添加: [Local] ${listen_ip:-0.0.0.0}:$listen_port -> [Remote] $remote_ip:$remote_port"
+    if [[ -n "$(sanitize_remark "$remark")" ]]; then
+        echo -e "备注: $(sanitize_remark "$remark")"
+    fi
     echo -e "${YELLOW}注意：请重启服务 (选项 12) 使配置生效。${PLAIN}"
     wait_for_key
 }
@@ -303,9 +348,6 @@ add_range_rule() {
     init_config
     echo -e "${YELLOW}=== 添加端口段转发规则 (TCP+UDP) ===${PLAIN}"
     echo -e "${YELLOW}说明：将本地端口段转发到目标服务器${PLAIN}"
-    echo -e "${GREEN}使用示例:${PLAIN}"
-    echo -e "  1:1映射: 监听 80-88 转目标 80-88 (目标起始端口留空)"
-    echo -e "  偏移映射: 监听 80-88 转目标 10-18 (输入目标起始端口 10，自动计算结束端口 18)"
     echo ""
 
     read -p "请输入监听 IP (默认 0.0.0.0, 回车即可): " listen_ip
@@ -343,6 +385,8 @@ add_range_rule() {
         wait_for_key
         return
     fi
+
+    read -p "请输入备注 (可选): " remark
 
     # 计算端口数量
     local port_count=$((port_end - port_start + 1))
@@ -451,8 +495,12 @@ add_range_rule() {
         fi
     fi
 
+    RULE_STR=$(append_remark "$RULE_STR" "$remark")
     sed -i "/# MARKER_END/i \\$RULE_STR" "$CONFIG_FILE"
 
+    if [[ -n "$(sanitize_remark "$remark")" ]]; then
+        echo -e "备注: $(sanitize_remark "$remark")"
+    fi
     echo -e "${YELLOW}注意：请重启服务 (选项 12) 使配置生效。${PLAIN}"
     wait_for_key
 }
@@ -482,7 +530,7 @@ view_rules() {
             fi
 
             if [[ -n "$l_port" && -n "$r_addr" ]]; then
-                echo "$l_ip:$l_port -> $r_addr"
+                echo "$l_ip:$l_port -> $r_addr$(format_remark "$line")"
                 ((rule_count++))
             fi
         # 匹配端口段规则
@@ -518,13 +566,13 @@ view_rules() {
                     # 计算实际目标端口段
                     r_start=$((l_start + offset))
                     r_end=$((l_end + offset))
-                    echo "$l_ip:$l_range -> $r_ip:$r_start-$r_end (端口段$offset_dir)"
+                    echo "$l_ip:$l_range -> $r_ip:$r_start-$r_end (端口段$offset_dir)$(format_remark "$line")"
                     ((rule_count++))
                 fi
             else
                 # 无端口映射，1:1映射
                 r_ip=$(echo "$line" | grep -oP 'dnat to \K[0-9.]+')
-                echo "$l_ip:$l_range -> $r_ip:$l_range (1:1映射)"
+                echo "$l_ip:$l_range -> $r_ip:$l_range (1:1映射)$(format_remark "$line")"
                 ((rule_count++))
             fi
         fi
@@ -597,12 +645,12 @@ quick_edit_rule() {
                     # 计算实际目标端口段
                     r_start=$((l_start + offset))
                     r_end=$((l_end + offset))
-                    echo -e "${GREEN}$i.${PLAIN} [端口段] $l_ip:$l_range -> $r_ip:$r_start-$r_end (端口段$offset_dir)"
+                    echo -e "${GREEN}$i.${PLAIN} [端口段] $l_ip:$l_range -> $r_ip:$r_start-$r_end (端口段$offset_dir)$(format_remark "$line")"
                 fi
             else
                 # 1:1映射
                 r_ip=$(echo "$line" | grep -oP 'dnat to \K[0-9.]+')
-                echo -e "${GREEN}$i.${PLAIN} [端口段] $l_ip:$l_range -> $r_ip:$l_range (1:1映射)"
+                echo -e "${GREEN}$i.${PLAIN} [端口段] $l_ip:$l_range -> $r_ip:$l_range (1:1映射)$(format_remark "$line")"
             fi
         else
             # 单端口规则
@@ -612,7 +660,7 @@ quick_edit_rule() {
             if echo "$line" | grep -q "ip daddr"; then
                 l_ip=$(echo "$line" | grep -oP 'ip daddr \K[0-9.]+')
             fi
-            echo -e "${GREEN}$i.${PLAIN} [单端口] $l_ip:$l_port -> $r_addr"
+            echo -e "${GREEN}$i.${PLAIN} [单端口] $l_ip:$l_port -> $r_addr$(format_remark "$line")"
         fi
         ((i++))
     done
@@ -635,6 +683,13 @@ quick_edit_rule() {
     idx=$((choice - 1))
     target_line_num=${line_numbers[$idx]}
     line_content=$(sed -n "${target_line_num}p" "$CONFIG_FILE")
+    old_remark=$(extract_remark "$line_content")
+    read -p "备注 [当前: ${old_remark:-无}] (直接回车保持原值，输入 - 清空): " new_remark
+    if [[ -z "$new_remark" ]]; then
+        new_remark="$old_remark"
+    elif [[ "$new_remark" == "-" ]]; then
+        new_remark=""
+    fi
 
     # 判断规则类型并执行相应的修改逻辑
     if echo "$line_content" | grep -q "dport { [0-9]\+-[0-9]\+ }"; then
@@ -842,6 +897,7 @@ quick_edit_rule() {
         echo -e "新规则: $new_l_ip:$new_l_port -> $new_r_ip:$new_r_port"
     fi
 
+    NEW_RULE=$(append_remark "$NEW_RULE" "$new_remark")
     sed -i "${target_line_num}c\\$NEW_RULE" "$CONFIG_FILE"
 
     echo -e "${YELLOW}注意：请重启服务 (选项 12) 使配置生效。${PLAIN}"
@@ -953,7 +1009,7 @@ delete_rule() {
                     if echo "$line" | grep -q "ip daddr"; then
                         l_ip=$(echo "$line" | grep -oP 'ip daddr \K[0-9.]+')
                     fi
-                    echo -e "${GREEN}$i.${PLAIN} [端口段] $l_ip:$l_range -> $r_ip:$r_start-$r_end (端口段$offset_dir)"
+                    echo -e "${GREEN}$i.${PLAIN} [端口段] $l_ip:$l_range -> $r_ip:$r_start-$r_end (端口段$offset_dir)$(format_remark "$line")"
                 fi
             else
                 # 无端口映射，1:1映射
@@ -962,7 +1018,7 @@ delete_rule() {
                 if echo "$line" | grep -q "ip daddr"; then
                     l_ip=$(echo "$line" | grep -oP 'ip daddr \K[0-9.]+')
                 fi
-                echo -e "${GREEN}$i.${PLAIN} [端口段] $l_ip:$l_range -> $r_ip:$l_range (1:1映射)"
+                echo -e "${GREEN}$i.${PLAIN} [端口段] $l_ip:$l_range -> $r_ip:$l_range (1:1映射)$(format_remark "$line")"
             fi
         else
             # 单端口规则
@@ -972,7 +1028,7 @@ delete_rule() {
             if echo "$line" | grep -q "ip daddr"; then
                 l_ip=$(echo "$line" | grep -oP 'ip daddr \K[0-9.]+')
             fi
-            echo -e "${GREEN}$i.${PLAIN} [单端口] $l_ip:$l_port -> $r_addr"
+            echo -e "${GREEN}$i.${PLAIN} [单端口] $l_ip:$l_port -> $r_addr$(format_remark "$line")"
         fi
         ((i++))
     done
