@@ -1034,26 +1034,68 @@ delete_rule() {
     done
 
     echo -e "--------------------------------"
-    read -p "请输入要删除的规则序号 (输入 0 取消): " choice
+    read -p "请输入要删除的规则序号 (多个用空格分隔，输入 all 删除全部，输入 0 取消): " choice
+    choice=$(echo "$choice" | xargs)
 
-    if [[ ! "$choice" =~ ^[0-9]+$ ]]; then
-        echo -e "${RED}输入无效，请输入数字。${PLAIN}"
-        wait_for_key
-        return
-    fi
-    if [ "$choice" -eq 0 ]; then main_menu; return; fi
-    if [ "$choice" -lt 1 ] || [ "$choice" -gt "$total" ]; then
-        echo -e "${RED}序号超出范围。${PLAIN}"
-        wait_for_key
+    if [[ -z "$choice" || "$choice" == "0" ]]; then
+        main_menu
         return
     fi
 
-    idx=$((choice - 1))
-    target_line_num=${line_numbers[$idx]}
+    local delete_indices=()
+    local item
+    local idx
+
+    if [[ "$choice" == "all" || "$choice" == "ALL" ]]; then
+        for ((idx=0; idx<total; idx++)); do
+            delete_indices+=("$idx")
+        done
+    else
+        for item in $choice; do
+            if [[ ! "$item" =~ ^[0-9]+$ ]]; then
+                echo -e "${RED}输入无效，请输入数字、多个数字或 all。${PLAIN}"
+                wait_for_key
+                return
+            fi
+            if [ "$item" -eq 0 ]; then
+                main_menu
+                return
+            fi
+            if [ "$item" -lt 1 ] || [ "$item" -gt "$total" ]; then
+                echo -e "${RED}序号 $item 超出范围。${PLAIN}"
+                wait_for_key
+                return
+            fi
+            idx=$((item - 1))
+            delete_indices+=("$idx")
+        done
+    fi
+
+    # 去重并按行号倒序排列，避免删除前面的行后导致后续行号偏移
+    local delete_line_nums=()
+    local seen=" "
+    for idx in "${delete_indices[@]}"; do
+        target_line_num=${line_numbers[$idx]}
+        if [[ "$seen" != *" $target_line_num "* ]]; then
+            seen+="$target_line_num "
+            delete_line_nums+=("$target_line_num")
+        fi
+    done
+
+    IFS=$'\n' delete_line_nums=($(printf '%s\n' "${delete_line_nums[@]}" | sort -nr))
+    unset IFS
+
+    if [ ${#delete_line_nums[@]} -eq 0 ]; then
+        echo -e "${RED}没有可删除的规则。${PLAIN}"
+        wait_for_key
+        return
+    fi
 
     # 显示将要删除的规则
-    echo -e "${YELLOW}即将删除规则:${PLAIN}"
-    sed -n "${target_line_num}p" "$CONFIG_FILE"
+    echo -e "${YELLOW}即将删除以下 ${#delete_line_nums[@]} 条规则:${PLAIN}"
+    for target_line_num in "${delete_line_nums[@]}"; do
+        sed -n "${target_line_num}p" "$CONFIG_FILE"
+    done
     read -p "确认删除？[y/n] (默认 y): " confirm
 
     if [[ "$confirm" == "n" || "$confirm" == "N" ]]; then
@@ -1062,9 +1104,11 @@ delete_rule() {
         return
     fi
 
-    sed -i "${target_line_num}d" "$CONFIG_FILE"
+    for target_line_num in "${delete_line_nums[@]}"; do
+        sed -i "${target_line_num}d" "$CONFIG_FILE"
+    done
 
-    echo -e "${GREEN}规则 $choice 已删除。${PLAIN}"
+    echo -e "${GREEN}已删除 ${#delete_line_nums[@]} 条规则。${PLAIN}"
     echo -e "${YELLOW}注意：请重启服务 (选项 12) 使配置生效。${PLAIN}"
     wait_for_key
 }
